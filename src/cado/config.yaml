@@ -19,3 +19,16 @@ zones:
   - zone_8
   - zone_9
   - zone_10
+
+# Risk Scoring Weights
+# Used by RiskCalculator to compute heat_risk_score, cooling_stress_score
+risk_weights:
+  heat_risk:
+    temperature: 0.4
+    cpu: 0.35
+    workload: 0.25
+  cooling_stress:
+    temperature: 0.35
+    humidity: 0.25
+    cpu: 0.25
+    memory: 0.15

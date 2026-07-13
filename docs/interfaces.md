@@ -15,50 +15,34 @@
 `pipeline-dev`가 수집·정제한 데이터를 `scoring-dev`가 소비하는 계약.
 
 - 모듈: `src/cado/collectors/`, `src/cado/pipeline/` → `src/cado/scoring/`
-
 - 입력 스키마: raw_metrics 테이블
-
   (instance_id, metric_name, value, observed_at)
-
 - 출력 스키마: zone_aggregated_metrics 테이블
-
   (zone_id, aggregated_at, avg_cpu_usage, avg_memory_usage, avg_workload_intensity)
-
   ※ zone_aggregated_metrics 산출(집계) 로직 자체는 아직 미구현. 현재 구현된 범위는
   raw_metrics row 생성(`CloudWatchCollector`)과 instance_id → zone_id 매핑(`ZoneMapper`)까지이며,
   이 둘을 조합해 zone 단위로 집계하는 코드는 `scoring-dev` 또는 별도 파이프라인 단계에서 작성 필요.
-
 - 함수 시그니처 (구현 위치: `src/cado/collectors/cloudwatch_collector.py`,
-  `src/cado/pipeline/zone_mapper.py`):
-
+`src/cado/pipeline/zone_mapper.py`):
   `CloudWatchCollector().collect() -> list[dict]`  # async def. raw_metrics row 리스트 반환
-
   `ZoneMapper().map(instance_id: str) -> str`  # zone_id 반환. 실패 시 `ZoneMappingError` 발생
-
 - `collect()`가 반환하는 dict의 정확한 키/타입:
-
   `{"instance_id": str, "metric_name": str, "value": float, "observed_at": datetime}`
-
   (metric_name은 "CPUUtilization" 또는 "MemoryUtilization", observed_at은 UTC aware datetime)
-
 - `ZoneMapper` 세부:
-
   - 생성자: `ZoneMapper(config_path: str | Path | None = None)`. 기본 경로는
-    `src/cado/config.yaml`.
+  `src/cado/config.yaml`.
   - 매핑 파일 형식: `config.yaml`의 `instance_to_zone: {instance_id: zone_id}` 딕셔너리.
-    zone은 zone_1~zone_10 10개 고정, v1 기준 instance는 1개만 매핑 예정(아직 실제
-    인스턴스 ID 미확정 — `.env`의 `CLOUDWATCH_TARGET_INSTANCE_ID`가 채워지면
-    `config.yaml`에 해당 키를 추가해야 함).
+  zone은 zone_1~zone_10 10개 고정, v1 기준 instance는 1개만 매핑 예정(아직 실제
+  인스턴스 ID 미확정 — `.env`의 `CLOUDWATCH_TARGET_INSTANCE_ID`가 채워지면
+  `config.yaml`에 해당 키를 추가해야 함).
   - 매핑에 없는 instance_id로 `map()` 호출 시 `ZoneMappingError` 예외 발생 (기본값 반환 없음).
   - 설정 파일이 없으면 `FileNotFoundError`, YAML 파싱 실패 시 `yaml.YAMLError` 발생.
-
 - 에러/재시도 정책:
-
   CloudWatch `get_metric_data` 호출 실패 시 메트릭별로 3회 재시도(지수 백오프), 실패하면 WARN
   로그 후 해당 메트릭만 스킵 — `collect()` 전체는 예외를 던지지 않고 빈 리스트/부분 결과를 반환.
-
 - 테스트: `tests/test_cloudwatch_collector.py`, `tests/test_zone_mapper.py` (moto로 CloudWatch
-  mock, `uv run pytest tests/` 로 실행 — 2026-07-13 기준 8개 전부 통과 확인).
+mock, `uv run pytest tests/` 로 실행 — 2026-07-13 기준 8개 전부 통과 확인).
 
 ---
 
@@ -69,11 +53,8 @@
 `pipeline-dev`가 소비하는 계약.
 
 - 모듈: `terraform/` → `src/cado/pipeline/`, `src/cado/collectors/`
-
 - 제공 리소스: TBD (예: CloudWatch 대상 인스턴스 ID, IAM 역할/정책)
-
 - 환경 변수/출력값: TBD `.env.example` 참고)
-
 - 가정/제약: TBD
 
 ---
@@ -82,15 +63,50 @@
 
 `scoring-dev`가 산출한 점수/랭킹 결과를 `ai-dev`가 소비하는 계약.
 
-- 모듈: `src/cado/scoring/` → `src/cado/agents/`
+- 모듈: `src/cado/pipeline/aggregator.py`, `src/cado/scoring/risk_calculator.py` → `src/cado/agents/`
+- 입력 스키마: zone_aggregated_metrics 테이블
+- 출력 스키마: derived_operational_status 테이블 (zone_id, evaluated_at, heat_risk_score,
+  cooling_stress_score, zone_imbalance_score, status_level, disclaimer)
 
-- 입력 스키마: TBD
+  ※ status_level/disclaimer 산출 로직은 아직 미구현. 현재 구현된 범위는 zone 단위 원시 집계
+  (`Aggregator`)와 zone 하나에 대한 3개 score 계산(`RiskCalculator`)까지이며, score → status_level
+  band 매핑과 disclaimer 생성은 `ai-dev` 또는 별도 단계에서 작성 필요.
 
-- 출력 스키마: TBD
+- 함수 시그니처:
 
-- 함수 시그니처: TBD
+  `Aggregator().aggregate() -> None`  # Supabase RPC `aggregate_zone_metrics()` 호출만 수행.
+  GROUP BY/AVG 등 집계 계산은 SQL 함수 내부에서 처리하고 `zone_aggregated_metrics`에 직접
+  insert함 — Python 쪽은 RPC 실패 여부만 확인. 실패 시 `AggregationError` 발생.
 
-- 우선순위/임계값 정의: TBD
+  `RiskCalculator().calculate(zone_metrics: dict) -> dict`  # zone_aggregated_metrics 한 행을
+  입력받아 아래 3개 score를 계산해 반환:
+  `{"heat_risk_score": float, "cooling_stress_score": float, "zone_imbalance_score": float}`
+  (모두 0~100 clamp)
+
+- `RiskCalculator` 세부:
+
+  - 생성자: `RiskCalculator(config_path: str | Path | None = None)`. 기본 경로는
+    `src/cado/config.yaml`.
+  - 가중치는 `config.yaml`의 `risk_weights.heat_risk` / `risk_weights.cooling_stress` 섹션에서
+    로드 (하드코딩 없음). `risk_weights` 섹션이 없으면 `RiskCalculationError` 발생.
+  - `zone_metrics`에 `temperature`/`humidity` 키가 없거나 값이 `None`이면 0으로 처리
+    (NULL-safe) — 현재 `zone_aggregated_metrics` 스키마엔 이 두 컬럼이 아예 없음.
+  - `zone_imbalance_score`는 **zone 간 비교가 아니라, 같은 row 안의
+    avg_cpu_usage/avg_memory_usage/avg_workload_intensity 3개 값에 대한 MAD를 2배 정규화한
+    v1 임시 근사치**다. v1에는 실제 활성 zone이 1개뿐이라 zone 간 비교가 아직 무의미하기 때문.
+    여러 zone에 실데이터가 쌓이면 zone 간 MAD 비교 방식으로 교체 필요.
+
+- `Aggregator` 세부:
+
+  - 호출하는 RPC: `aggregate_zone_metrics` (Supabase/Postgres 쪽에 이미 정의되어 있다고 가정).
+  - RPC 실패(에러 응답 또는 호출 자체 실패) 시 `AggregationError` 발생 — 조용히 삼키지 않음.
+
+- 우선순위/임계값 정의: docs/risk-scoring.md 참고 (score band: LOW/MEDIUM/HIGH/EXTREME,
+  imbalance band: NONE/MODERATE/SEVERE — band 매핑 자체는 아직 코드로 구현되지 않음)
+
+- 테스트: `tests/test_risk_calculator.py` (`uv run pytest tests/` 로 실행 — 2026-07-13 기준
+  RiskCalculator 8개 포함 전체 16개 전부 통과 확인). Aggregator는 Supabase RPC 의존이라 별도
+  테스트 없음 (요청 범위 아님).
 
 ---
 
@@ -99,12 +115,8 @@
 `ai-dev`가 생성한 조사/분석 결과를 `api`가 소비하여 클라이언트에 노출하는 계약.
 
 - 모듈: `src/cado/agents/` → `src/cado/api/`
-
 - 입력 스키마: TBD
-
 - 응답(API) 스키마: TBD
-
 - 엔드포인트 목록: TBD
-
 - 에러 응답 형식: TBD
 
