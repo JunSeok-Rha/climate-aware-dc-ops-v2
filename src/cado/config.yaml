@@ -1,0 +1,21 @@
+# Zone Mapping Configuration
+# Maps instance_id to zone_id
+# Total 10 zones (zone_1 ~ zone_10). v1: only one EC2 instance will exist,
+# mapped to zone_1; the remaining zones have no instance mapped yet.
+# CLOUDWATCH_TARGET_INSTANCE_ID in .env must match a key below.
+
+instance_to_zone:
+  # Example: i-0123456789abcdef0: zone_1
+  # i-your-actual-instance-id: zone_1
+
+zones:
+  - zone_1
+  - zone_2
+  - zone_3
+  - zone_4
+  - zone_5
+  - zone_6
+  - zone_7
+  - zone_8
+  - zone_9
+  - zone_10
