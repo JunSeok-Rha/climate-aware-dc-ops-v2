@@ -1,0 +1,54 @@
+# Python runtime
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info
+*.egg
+
+# Environment and secrets
+.env
+.env.local
+
+# Testing
+tests
+.pytest_cache
+.coverage
+htmlcov
+.tox
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+docs
+README.md
+*.md
+
+# Infrastructure (not needed in app image)
+terraform
+.terraform
+*.tfstate
+*.tfstate.backup
+
+# Claude Code
+.claude
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# CI/CD
+.github
+
+# Other
+.DS_Store
+Thumbs.db
