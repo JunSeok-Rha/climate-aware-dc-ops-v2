@@ -35,7 +35,7 @@ class TestRiskCalculator:
         # With mid-range values and non-zero weights, scores should be positive
         assert result["heat_risk_score"] > 0
         assert result["cooling_stress_score"] > 0
-        # Imbalance should be 0 since all three metrics are equal (50)
+        # Imbalance defaults to 0 when not provided
         assert result["zone_imbalance_score"] == 0
 
     def test_all_zeros(self, calculator):
@@ -93,8 +93,8 @@ class TestRiskCalculator:
         # Scores should be positive (based on cpu/memory/workload only)
         assert result["heat_risk_score"] > 0
         assert result["cooling_stress_score"] > 0
-        # Imbalance should be > 0 since metrics differ (60, 40, 50)
-        assert result["zone_imbalance_score"] > 0
+        # Imbalance defaults to 0 when not provided
+        assert result["zone_imbalance_score"] == 0
 
     def test_none_values_treated_as_zero(self, calculator):
         """Test that None values are treated as 0."""
@@ -113,35 +113,21 @@ class TestRiskCalculator:
         assert 0 <= result["cooling_stress_score"] <= 100
         assert result["zone_imbalance_score"] == 0  # All three metrics equal
 
-    def test_imbalance_calculation(self, calculator):
-        """Test zone imbalance score with varying metrics."""
-        # Highly imbalanced: 0, 50, 100
+    def test_imbalance_score_parameter(self, calculator):
+        """Test that zone_imbalance_score parameter is properly included in results."""
         zone_metrics = {
-            "avg_cpu_usage": 0.0,
+            "avg_cpu_usage": 50.0,
             "avg_memory_usage": 50.0,
-            "avg_workload_intensity": 100.0,
+            "avg_workload_intensity": 50.0,
         }
 
-        result = calculator.calculate(zone_metrics)
+        # Test with custom imbalance score
+        result = calculator.calculate(zone_metrics, zone_imbalance_score=75.0)
+        assert result["zone_imbalance_score"] == 75.0
 
-        # Should have maximum imbalance score
-        # MAD of [0, 50, 100]: median=50, deviations=[50, 0, 50], MAD=50
-        # Normalized: 50 * 2 = 100
-        assert result["zone_imbalance_score"] == 100
-
-        # Moderately imbalanced: 30, 50, 70
-        zone_metrics_moderate = {
-            "avg_cpu_usage": 30.0,
-            "avg_memory_usage": 50.0,
-            "avg_workload_intensity": 70.0,
-        }
-
-        result_moderate = calculator.calculate(zone_metrics_moderate)
-
-        # Should have moderate imbalance
-        # MAD of [30, 50, 70]: median=50, deviations=[20, 0, 20], MAD=20
-        # Normalized: 20 * 2 = 40
-        assert result_moderate["zone_imbalance_score"] == 40
+        # Test with default (0.0)
+        result_default = calculator.calculate(zone_metrics)
+        assert result_default["zone_imbalance_score"] == 0.0
 
     def test_missing_config_section_raises_error(self):
         """Test that missing risk_weights section raises error."""
@@ -176,3 +162,117 @@ class TestRiskCalculator:
         assert result["heat_risk_score"] == 100
         assert result["cooling_stress_score"] == 100
         assert result["zone_imbalance_score"] <= 100
+
+
+class TestCalculateImbalance:
+    """Test suite for calculate_imbalance cross-zone comparison."""
+
+    @pytest.fixture
+    def calculator(self):
+        """Create RiskCalculator instance with default config."""
+        return RiskCalculator()
+
+    def test_single_zone_returns_zero(self, calculator):
+        """Test that single zone returns 0 imbalance (no comparison possible)."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 75.0}
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        assert result == {"zone_1": 0.0}
+
+    def test_identical_cpu_usage_returns_zero(self, calculator):
+        """Test that identical CPU usage across all zones returns all 0."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 50.0},
+            {"zone_id": "zone_2", "avg_cpu_usage": 50.0},
+            {"zone_id": "zone_3", "avg_cpu_usage": 50.0},
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        # All zones should have 0 imbalance (no deviation)
+        assert result["zone_1"] == 0.0
+        assert result["zone_2"] == 0.0
+        assert result["zone_3"] == 0.0
+
+    def test_extreme_outlier_zone(self, calculator):
+        """Test that zone with extreme CPU usage gets high imbalance score."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 30.0},
+            {"zone_id": "zone_2", "avg_cpu_usage": 35.0},
+            {"zone_id": "zone_3", "avg_cpu_usage": 95.0},  # Extreme outlier
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        # zone_3 should have significantly higher imbalance score
+        assert result["zone_3"] > result["zone_1"]
+        assert result["zone_3"] > result["zone_2"]
+        # Outlier should have a notably high score
+        assert result["zone_3"] > 50.0
+        # All scores should be in valid range
+        assert 0 <= result["zone_1"] <= 100
+        assert 0 <= result["zone_2"] <= 100
+        assert 0 <= result["zone_3"] <= 100
+
+    def test_symmetric_distribution(self, calculator):
+        """Test symmetric CPU distribution around median."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 30.0},
+            {"zone_id": "zone_2", "avg_cpu_usage": 50.0},  # Median
+            {"zone_id": "zone_3", "avg_cpu_usage": 70.0},
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        # zone_2 (at median) should have 0 imbalance
+        assert result["zone_2"] == 0.0
+        # zone_1 and zone_3 should have equal imbalance (symmetric deviation)
+        assert result["zone_1"] == result["zone_3"]
+        # Both should be positive
+        assert result["zone_1"] > 0
+        assert result["zone_3"] > 0
+
+    def test_missing_zone_id(self, calculator):
+        """Test handling of zones without zone_id."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 50.0},
+            {"avg_cpu_usage": 60.0},  # Missing zone_id
+            {"zone_id": "zone_3", "avg_cpu_usage": 70.0},
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        # Should only return results for zones with zone_id
+        assert "zone_1" in result
+        assert "zone_3" in result
+        assert len(result) == 2
+
+    def test_missing_cpu_usage(self, calculator):
+        """Test that missing avg_cpu_usage is treated as 0."""
+        all_zones = [
+            {"zone_id": "zone_1", "avg_cpu_usage": 50.0},
+            {"zone_id": "zone_2"},  # Missing avg_cpu_usage
+            {"zone_id": "zone_3", "avg_cpu_usage": 60.0},
+        ]
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        # Should calculate for all zones, treating missing as 0
+        assert len(result) == 3
+        assert "zone_1" in result
+        assert "zone_2" in result
+        assert "zone_3" in result
+        # All scores should be in valid range
+        for score in result.values():
+            assert 0 <= score <= 100
+
+    def test_empty_list(self, calculator):
+        """Test that empty zone list returns empty dict."""
+        all_zones = []
+
+        result = calculator.calculate_imbalance(all_zones)
+
+        assert result == {}

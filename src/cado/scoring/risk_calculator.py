@@ -70,7 +70,7 @@ class RiskCalculator:
             logger.error(f"Failed to parse config YAML: {e}")
             raise
 
-    def calculate(self, zone_metrics: dict) -> dict:
+    def calculate(self, zone_metrics: dict, zone_imbalance_score: float = 0.0) -> dict:
         """
         Calculate risk scores for a single zone's aggregated metrics.
 
@@ -81,6 +81,9 @@ class RiskCalculator:
                 - avg_workload_intensity: float (0-100)
                 - temperature: float (optional, defaults to 0 if missing)
                 - humidity: float (optional, defaults to 0 if missing)
+            zone_imbalance_score: Pre-calculated zone imbalance score (0-100).
+                Should be computed using calculate_imbalance() for cross-zone comparison.
+                Defaults to 0.0 if not provided.
 
         Returns:
             Dict with computed scores:
@@ -93,9 +96,8 @@ class RiskCalculator:
         Note:
             - All scores are clamped to 0-100 range
             - temperature/humidity are NULL-safe (default to 0 if missing)
-            - zone_imbalance_score: Currently approximated using MAD of cpu/memory/workload
-              within the same row. This is a v1 interim measure; when multiple zones are
-              active, this should be replaced with cross-zone MAD comparison.
+            - zone_imbalance_score should be computed separately using calculate_imbalance()
+              which performs cross-zone MAD comparison based on avg_cpu_usage
         """
         # Extract metrics with NULL-safe defaults
         cpu = zone_metrics.get("avg_cpu_usage") or 0
@@ -121,10 +123,6 @@ class RiskCalculator:
             + memory * cooling_weights["memory"]
         )
 
-        # Calculate zone_imbalance_score using MAD
-        # v1 approximation: MAD of cpu/memory/workload within the same row
-        zone_imbalance_score = self._calculate_mad_imbalance(cpu, memory, workload)
-
         # Clamp all scores to 0-100 range
         return {
             "heat_risk_score": self._clamp(heat_risk_score, 0, 100),
@@ -132,39 +130,77 @@ class RiskCalculator:
             "zone_imbalance_score": self._clamp(zone_imbalance_score, 0, 100),
         }
 
-    def _calculate_mad_imbalance(
-        self, cpu: float, memory: float, workload: float
-    ) -> float:
+    def calculate_imbalance(self, all_zones: list[dict]) -> dict[str, float]:
         """
-        Calculate zone imbalance using Median Absolute Deviation.
+        Calculate zone imbalance scores via cross-zone MAD comparison.
 
-        This is a v1 approximation that measures imbalance among cpu/memory/workload
-        within a single zone row. When multiple zones are active, this should be
-        replaced with cross-zone MAD comparison.
+        Compares each zone's avg_cpu_usage against the overall median to identify
+        zones with anomalous workload distribution.
 
         Args:
-            cpu: CPU usage (0-100)
-            memory: Memory usage (0-100)
-            workload: Workload intensity (0-100)
+            all_zones: List of zone metric dicts, each containing at least:
+                - zone_id: str
+                - avg_cpu_usage: float (0-100)
 
         Returns:
-            Imbalance score (0-100), where higher values indicate more imbalance
+            Dict mapping zone_id to imbalance_score (0-100), where higher values
+            indicate greater deviation from the median CPU usage across all zones.
+
+        Note:
+            - If only 1 zone exists, returns {zone_id: 0.0} (no comparison possible)
+            - If all zones have identical avg_cpu_usage, returns all 0.0 (no deviation)
+            - Normalization: MAD-based deviation scaled to 0-100 range
         """
-        values = sorted([cpu, memory, workload])
-        median = values[1]  # Middle value of 3 sorted values
+        # Edge case: single zone has no cross-zone comparison
+        if len(all_zones) <= 1:
+            if len(all_zones) == 1:
+                zone_id = all_zones[0].get("zone_id", "unknown")
+                return {zone_id: 0.0}
+            return {}
+
+        # Extract CPU usage values and build zone_id mapping
+        zone_cpu_map = {}
+        for zone in all_zones:
+            zone_id = zone.get("zone_id")
+            cpu_usage = zone.get("avg_cpu_usage") or 0.0
+            if zone_id:
+                zone_cpu_map[zone_id] = cpu_usage
+
+        cpu_values = list(zone_cpu_map.values())
+
+        # Calculate median of all CPU values
+        sorted_values = sorted(cpu_values)
+        n = len(sorted_values)
+        if n % 2 == 0:
+            median = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+        else:
+            median = sorted_values[n // 2]
 
         # Calculate absolute deviations from median
-        deviations = [abs(v - median) for v in values]
-        mad = sorted(deviations)[1]  # Median of deviations (middle value)
+        deviations = [abs(cpu - median) for cpu in cpu_values]
 
-        # Normalize MAD to 0-100 scale
-        # Maximum theoretical MAD for values in 0-100 range is 50
-        # (e.g., when values are 0, 0, 100: median=0, deviations=[0,0,100], MAD=0)
-        # (e.g., when values are 0, 50, 100: median=50, deviations=[50,0,50], MAD=50)
-        # We scale MAD by 2 to get 0-100 range
-        imbalance_score = mad * 2
+        # Calculate MAD (median of absolute deviations)
+        sorted_deviations = sorted(deviations)
+        if n % 2 == 0:
+            mad = (sorted_deviations[n // 2 - 1] + sorted_deviations[n // 2]) / 2
+        else:
+            mad = sorted_deviations[n // 2]
 
-        return imbalance_score
+        # Edge case: all zones have identical CPU usage (MAD = 0)
+        if mad == 0:
+            return {zone_id: 0.0 for zone_id in zone_cpu_map.keys()}
+
+        # Calculate normalized imbalance score for each zone
+        result = {}
+        for zone_id, cpu_usage in zone_cpu_map.items():
+            deviation = abs(cpu_usage - median)
+            # Normalize by MAD and scale to 0-100
+            # A zone with deviation = MAD gets score of ~50
+            # A zone with deviation = 2*MAD gets score of 100 (clamped)
+            normalized_score = (deviation / mad) * 50
+            result[zone_id] = self._clamp(normalized_score, 0, 100)
+
+        return result
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
