@@ -64,31 +64,32 @@ mock, `uv run pytest tests/` 로 실행 — 2026-07-13 기준 8개 전부 통과
 `scoring-dev`가 산출한 점수/랭킹 결과를 `ai-dev`가 소비하는 계약.
 
 - 모듈: `src/cado/pipeline/aggregator.py`, `src/cado/scoring/risk_calculator.py`,
-  `src/cado/scoring/status_classifier.py` → `src/cado/agents/`
+`src/cado/scoring/status_classifier.py` → `src/cado/agents/`
 - 입력 스키마: zone_aggregated_metrics 테이블
 - 출력 스키마: derived_operational_status 테이블 (zone_id, evaluated_at, heat_risk_score,
 cooling_stress_score, zone_imbalance_score, status_level, disclaimer)
-  ※ status_level 매핑은 `StatusClassifier`로 구현됨. disclaimer 생성은 아직 미구현으로
-  `ai-dev` 또는 별도 단계에서 작성 필요. 현재 구현된 범위는 zone 단위 원시 집계
-  (`Aggregator`), zone 하나에 대한 3개 score 계산(`RiskCalculator`), score → status_level
-  band 매핑(`StatusClassifier`)까지.
+※ status_level 매핑은 `StatusClassifier`로 구현됨. disclaimer 생성은 아직 미구현으로
+`ai-dev` 또는 별도 단계에서 작성 필요. 현재 구현된 범위는 zone 단위 원시 집계
+(`Aggregator`), zone 하나에 대한 3개 score 계산(`RiskCalculator`), score → status_level
+band 매핑(`StatusClassifier`)까지.
 - 함수 시그니처:
-  `Aggregator().aggregate() -> None`  # Supabase RPC `aggregate_zone_metrics()` 호출만 수행.
-  GROUP BY/AVG 등 집계 계산은 SQL 함수 내부에서 처리하고 `zone_aggregated_metrics`에 직접
-  insert함 — Python 쪽은 RPC 실패 여부만 확인. 실패 시 `AggregationError` 발생.
-  `RiskCalculator().calculate(zone_metrics: dict) -> dict`  # zone_aggregated_metrics 한 행을
-  입력받아 아래 3개 score를 계산해 반환:
-  `{"heat_risk_score": float, "cooling_stress_score": float, "zone_imbalance_score": float}`
-  (모두 0~100 clamp)
-  `StatusClassifier().classify(scores: dict) -> str`  # RiskCalculator.calculate() 반환값
-  (heat_risk_score/cooling_stress_score/zone_imbalance_score를 포함한 dict)을 입력받아
-  status_level enum 문자열 중 하나를 반환: "NORMAL", "ADVISORY", "ELEVATED", "WARNING", "CRITICAL".
-  분류는 우선순위 기반 규칙 체인(CRITICAL → WARNING → ELEVATED → ADVISORY → NORMAL)으로
-  수행하며, 첫 매칭 규칙에서 결정.
-  `score_to_band(score: float) -> str`  # 헬퍼. risk score(0~100)를 band로 매핑:
-  "LOW"(0~<30), "MEDIUM"(30~<55), "HIGH"(55~<75), "EXTREME"(75~)
-  `imbalance_to_band(score: float) -> str`  # 헬퍼. imbalance score(0~100)를 band로 매핑:
-  "NONE"(0~<20), "MODERATE"(20~<50), "SEVERE"(50~)
+`Aggregator().aggregate() -> None`  # Supabase RPC `aggregate_zone_metrics()` 호출만 수행.
+GROUP BY/AVG 등 집계 계산은 SQL 함수 내부에서 처리하고 `zone_aggregated_metrics`에 직접
+insert함 — Python 쪽은 RPC 실패 여부만 확인. 실패 시 `AggregationError` 발생.
+`RiskCalculator().calculate(zone_metrics: dict, zone_imbalance_score: float = 0.0) -> dict`  #
+zone_aggregated_metrics 한 행을 입력받아 아래 3개 score를 계산해 반환:
+`{"heat_risk_score": float, "cooling_stress_score": float, "zone_imbalance_score": float}`
+(모두 0~~100 clamp). zone_imbalance_score는 파라미터로 전달받으며, 별도로 `calculate_imbalance()`
+호출을 통해 계산된 값을 사용해야 함
+`StatusClassifier().classify(scores: dict) -> str`  # RiskCalculator.calculate() 반환값
+(heat_risk_score/cooling_stress_score/zone_imbalance_score를 포함한 dict)을 입력받아
+status_level enum 문자열 중 하나를 반환: "NORMAL", "ADVISORY", "ELEVATED", "WARNING", "CRITICAL".
+분류는 우선순위 기반 규칙 체인(CRITICAL → WARNING → ELEVATED → ADVISORY → NORMAL)으로
+수행하며, 첫 매칭 규칙에서 결정.
+`score_to_band(score: float) -> str`  # 헬퍼. risk score(0~~100)를 band로 매핑:
+"LOW"(0~~<30), "MEDIUM"(30~~<55), "HIGH"(55~~<75), "EXTREME"(75~~)
+`imbalance_to_band(score: float) -> str`  # 헬퍼. imbalance score(0~~100)를 band로 매핑:
+"NONE"(0~~<20), "MODERATE"(20~~<50), "SEVERE"(50~~)
 - `RiskCalculator` 세부:
   - 생성자: `RiskCalculator(config_path: str | Path | None = None)`. 기본 경로는
   `src/cado/config.yaml`.
@@ -96,20 +97,26 @@ cooling_stress_score, zone_imbalance_score, status_level, disclaimer)
   로드 (하드코딩 없음). `risk_weights` 섹션이 없으면 `RiskCalculationError` 발생.
   - `zone_metrics`에 `temperature`/`humidity` 키가 없거나 값이 `None`이면 0으로 처리
   (NULL-safe) — 현재 `zone_aggregated_metrics` 스키마엔 이 두 컬럼이 아예 없음.
-  - `zone_imbalance_score`는 **zone 간 비교가 아니라, 같은 row 안의
-  avg_cpu_usage/avg_memory_usage/avg_workload_intensity 3개 값에 대한 MAD를 2배 정규화한
-  v1 임시 근사치**다. v1에는 실제 활성 zone이 1개뿐이라 zone 간 비교가 아직 무의미하기 때문.
-  여러 zone에 실데이터가 쌓이면 zone 간 MAD 비교 방식으로 교체 필요.
+  - `zone_imbalance_score`는 `calculate()` 호출 시 파라미터로 전달해야 하며, 기본값은 0.0.
+  실제 값은 `calculate_imbalance(all_zones)` 메서드로 zone 간 비교를 수행하여 얻음.
 - `Aggregator` 세부:
   - 호출하는 RPC: `aggregate_zone_metrics` (Supabase/Postgres 쪽에 이미 정의되어 있다고 가정).
   - RPC 실패(에러 응답 또는 호출 자체 실패) 시 `AggregationError` 발생 — 조용히 삼키지 않음.
 - 우선순위/임계값 정의: `docs/status-classification.md` 참고 (score band: LOW/MEDIUM/HIGH/EXTREME,
 imbalance band: NONE/MODERATE/SEVERE — band 매핑은 `StatusClassifier`로 구현됨. 13개
 우선순위 규칙에 따라 status_level 분류)
-- 테스트: `tests/test_risk_calculator.py` (RiskCalculator 8개), `tests/test_status_classifier.py`
-(StatusClassifier 13개 + band helper 7개) (`uv run pytest tests/` 로 실행 — 2026-07-14 기준
-전체 36개 전부 통과 확인). Aggregator는 Supabase RPC 의존이라 별도 테스트 없음 (요청 범위 아님).
+- 테스트: `tests/test_risk_calculator.py` (RiskCalculator.calculate() 8개 + calculate_imbalance()
+7개), `tests/test_status_classifier.py` (StatusClassifier 13개 + band helper 7개)
+(`uv run pytest tests/` 로 실행 — 2026-07-14 기준 전체 43개 전부 통과 확인). Aggregator는
+Supabase RPC 의존이라 별도 테스트 없음 (요청 범위 아님).
 - status_level enum 값: NORMAL, ADVISORY, ELEVATED, WARNING, CRITICAL
+`RiskCalculator().calculate_imbalance(all_zones: list[dict]) -> dict[str, float]`  #
+zone 간 CPU 사용률 비교를 통해 각 zone의 imbalance_score를 계산. 입력:
+`all_zones`는 zone_aggregated_metrics 여러 행(dict 리스트), 각 dict는 최소 `zone_id`와
+`avg_cpu_usage` 키를 포함해야 함. 반환: `{zone_id: imbalance_score(0~~100)}` dict.
+zone이 1개뿐이면 해당 zone에 0.0 반환(비교 대상 없음). 모든 zone의 avg_cpu_usage가 동일하면
+전부 0.0 반환(편차 없음). MAD(median absolute deviation) 기반으로 정규화하며,
+median으로부터 MAD만큼 떨어진 zone은 약 50점, 2*MAD 이상 떨어지면 100점(clamp됨)
 
 ---
 
