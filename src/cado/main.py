@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 
+from cado.api.routes import router as zones_router
 from cado.db.supabase_client import get_supabase_client
 
 app = FastAPI()
+app.include_router(zones_router)
 
 
 @app.get("/api/health")

@@ -130,3 +130,30 @@ median으로부터 MAD만큼 떨어진 zone은 약 50점, 2*MAD 이상 떨어지
 - 엔드포인트 목록: TBD
 - 에러 응답 형식: TBD
 
+---
+
+## 5. scoring-dev → api (직접 연동, ai-dev 이전 임시 경로)
+
+`ai-dev`의 disclaimer 생성이 아직 없어, `derived_operational_status` 테이블에
+쓰는 별도 배치 없이 `api` 레이어가 `zone_aggregated_metrics`를 직접 읽어
+`RiskCalculator`/`StatusClassifier`로 즉석 계산한다. `ai-dev`가 disclaimer를
+포함한 영속 계층을 만들면 이 경로는 대체될 예정.
+
+- 모듈: `src/cado/scoring/risk_calculator.py`, `src/cado/scoring/status_classifier.py`
+  → `src/cado/api/routes.py`
+- 입력: `zone_aggregated_metrics` 테이블에서 zone_id별 최신 row(aggregated_at desc, 첫 row)만
+  사용. `CloudWatchCollector`/`ZoneMapper`/`Aggregator`는 이 테이블을 채우는 업스트림
+  파이프라인 단계이며, API 요청 경로에서 직접 호출하지 않는다(GET 요청에서 수집·집계를
+  트리거하지 않음).
+- 엔드포인트:
+  - `GET /api/zones`: config.yaml의 `zones`(zone_1~zone_10) 10개 전체를 반환하며, 각 zone의
+    `status_level`을 포함. `zone_aggregated_metrics`에 아직 집계 데이터가 없는 zone은
+    `status_level: null`로 표시(목록에서 누락하지 않음).
+  - `GET /api/zones/{zone_id}/status`: 단일 zone의 `heat_risk_score`, `cooling_stress_score`,
+    `zone_imbalance_score`, `status_level` 반환.
+- 에러 응답: `zone_id`가 config.yaml의 10개 zone 목록에 없거나, 유효한 zone_id이지만
+  `zone_aggregated_metrics`에 아직 데이터가 없는 경우 모두 404 반환(둘 다 "해당 zone의
+  상태를 알 수 없음"으로 취급). 두 경우는 `detail` 메시지 문구로만 구분됨.
+- imbalance 계산: 매 요청마다 그 시점에 데이터가 존재하는 zone들만 모아
+  `RiskCalculator.calculate_imbalance()`로 재계산(캐싱 없음).
+
