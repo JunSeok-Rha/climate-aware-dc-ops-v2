@@ -157,3 +157,20 @@ median으로부터 MAD만큼 떨어진 zone은 약 50점, 2*MAD 이상 떨어지
 - imbalance 계산: 매 요청마다 그 시점에 데이터가 존재하는 zone들만 모아
   `RiskCalculator.calculate_imbalance()`로 재계산(캐싱 없음).
 
+---
+
+## 모듈 의존성 그래프 (병렬 작업 판단용)
+
+```
+collectors/ (CloudWatch)     ─┐
+pipeline/ (Aggregator)        ├─→ scoring/ (Risk, Status)  ─→ agents/ (AI) ─→ api/
+                              ─┘
+```
+
+병렬 가능 조합 예시:
+- collectors/ 작업 중 agents/ 작업 (agents는 mock 데이터로 개발 가능)
+- infra/ 작업 중 scoring/ 작업 (서로 파일 안 겹침)
+
+병렬 불가 조합:
+- collectors/ 작업 중 pipeline/ 작업 (pipeline이 collectors 출력에 의존)
+
