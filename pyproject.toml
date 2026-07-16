@@ -23,3 +23,8 @@ addopts = "-m 'not integration'"
 markers = [
     "integration: marks tests as integration tests that require real AWS resources (excluded by default)",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest-timeout>=2.4.0",
+]
