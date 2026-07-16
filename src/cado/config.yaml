@@ -5,8 +5,7 @@
 # CLOUDWATCH_TARGET_INSTANCE_ID in .env must match a key below.
 
 instance_to_zone:
-  # Example: i-0123456789abcdef0: zone_1
-  # i-your-actual-instance-id: zone_1
+  i-0d9eb567166c3658f: zone_1
 
 zones:
   - zone_1
