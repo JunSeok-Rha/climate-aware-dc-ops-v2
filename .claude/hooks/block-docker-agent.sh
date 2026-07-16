@@ -11,7 +11,11 @@ if [ -z "$command" ]; then
   exit 0
 fi
 
-if echo "$command" | grep -Eiq '(^|[;&|[:space:]])docker[[:space:]]+(run|build|compose|exec)([[:space:]]|$)'; then
+# 실행되는 첫 번째 토큰만 확인한다 (예: git commit -m 안의 "docker build" 같은
+# 텍스트 오탐을 방지하기 위해, 커맨드 문자열 전체가 아니라 실제 실행 명령만 본다).
+read -r first second _ <<< "$command"
+
+if [ "$first" = "docker" ] && [[ "$second" =~ ^(run|build|compose|exec)$ ]]; then
   echo "차단됨: Docker 실행/빌드 명령은 서브에이전트가 실행할 수 없습니다. 사람이 직접 실행해야 합니다." >&2
   exit 2
 fi
